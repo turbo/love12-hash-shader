@@ -1,0 +1,61 @@
+/* hash_bounds.comp – 128-bit  */
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+/* === inputs =========================================================== */
+layout(rgba32f) readonly uniform image2D Src;             /* the canvas   */
+uniform ivec4 Bounds;   /* (minX, minY, maxX, maxY); maxX < 0 → disabled */
+
+/* === output =========================================================== */
+layout(std430) buffer Hash { uint h[]; };
+
+/* === work-group shared totals ========================================= */
+shared uint l0, l1, l2, l3;
+
+void computemain() {
+  ivec2 id  = ivec2(gl_GlobalInvocationID.xy);
+  ivec2 dim = imageSize(Src);
+
+  /* guard against ceil-dispatch overflow */
+  if (id.x >= dim.x || id.y >= dim.y) return;
+
+  /* skip pixels outside user-supplied bounds (if any) */
+  if (Bounds.z >= 0) {                      /* bounds enabled?      */
+      if (id.x < Bounds.x || id.x > Bounds.z ||
+          id.y < Bounds.y || id.y > Bounds.w) return;
+  }
+
+  /* zero work-group shared memory exactly once */
+  if (gl_LocalInvocationIndex == 0u)
+      l0 = l1 = l2 = l3 = 0u;
+  memoryBarrierShared(); barrier();
+
+  /* per-pixel mix ----------------------------------------------------- */
+  vec4  px = imageLoad(Src, id);
+  uvec4 c  = uvec4(round(px * 255.0));
+
+  /*
+    These are the two magic multipliers from SplitMix32 — a compact, 
+    well-studied integer hash by Sebastiano Vigna (derived from Guy Steele’s 
+    SplitMix64 constants). They’re deliberately odd and have good avalanche: 
+    flipping a single input bit flips ~16 output bits on average.
+  */
+  uint m0 = c.r ^ ((uint(id.x) << 16) | uint(id.y));
+  uint m1 = c.g ^ ((uint(id.y) << 16) | uint(id.x));
+  uint m2 = c.b ^ (uint(id.x) * 0x45d9f3bu);
+  uint m3 = c.a ^ (uint(id.y) * 0x119de1f3u);
+
+  atomicAdd(l0, m0);
+  atomicAdd(l1, m1);
+  atomicAdd(l2, m2);
+  atomicAdd(l3, m3);
+
+  barrier(); memoryBarrierShared();
+
+  if (gl_LocalInvocationIndex == 0u) {
+    atomicAdd(h[0], l0);
+    atomicAdd(h[1], l1);
+    atomicAdd(h[2], l2);
+    atomicAdd(h[3], l3);
+  }
+}
